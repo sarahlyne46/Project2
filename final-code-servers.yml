@@ -1,0 +1,177 @@
+Parameters:
+
+    EnvironmentName:
+        Description: An environment name that will be prefixed to resource names
+        Type: String
+    UbuntuAMI:
+        Description: ID of the Ami to use (should be Ubuntu 18)
+        Type: String
+        Default: ami-07452e54e776102de
+        
+Resources:    
+
+# Load Balancer Security Group
+    UdagramLoadBalancerSecGroup:
+      Type: AWS::EC2::SecurityGroup
+      Properties:
+        GroupDescription: Allow http to our load balancer
+        VpcId:
+          Fn::ImportValue:
+            !Sub "${EnvironmentName}-VPCID"
+        SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+
+#WebServer
+    UdagramServerSecGroup:
+      Type: AWS::EC2::SecurityGroup
+      Properties:
+        GroupDescription: Allow http to our hosts and SSH from local only
+        VpcId:
+          Fn::ImportValue:
+            !Sub "${EnvironmentName}-VPCID"
+        SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 0
+          ToPort: 65535
+          CidrIp: 0.0.0.0/0
+
+# IAM Role with Read only access to S3
+    UdacityS3ReadOnlyEC2Role:
+      Type: AWS::IAM::Role
+      Properties:
+        AssumeRolePolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Principal:
+                Service:
+                  - s3.amazonaws.com
+              Action:
+                - 'sts:AssumeRole'
+        Description: Role to provide read only access to s3
+        Policies:
+          - PolicyName: EmbeddedInlinePolicy
+            PolicyDocument:
+              Version: "2012-10-17"
+              Statement:
+                - Effect: Allow
+                  Action: 'cloudformation:*'
+                  Resource: '*'
+        ManagedPolicyArns:
+          - arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess
+        RoleName: UdacityS3ReadOnlyEC2
+
+# instance Profile which is linked to previously created IAM Role
+    ProfileWithRolesForOurApp:
+      Type: AWS::IAM::InstanceProfile
+      Properties:
+        InstanceProfileName: UdacityReadS3
+        Roles:
+          - UdacityS3ReadOnlyEC2
+
+    UdagramWebAppLaunchConfig:
+      Type: AWS::AutoScaling::LaunchConfiguration
+      Properties:
+        UserData:
+          Fn::Base64: !Sub |
+            #!/bin/bash
+            apt-get update -y
+            apt-get install apache2 -y
+            systemctl start apache2.service
+            cd /var/www/html
+            echo "Udacity Demo Web Server Up and Running!" > index.html          
+        ImageId: !Ref UbuntuAMI
+        KeyName: AWS_ec2_demo
+        SecurityGroups:
+        - Ref: UdagramServerSecGroup
+        InstanceType: t3.medium
+        BlockDeviceMappings:
+        - DeviceName: "/dev/sdk"
+          Ebs:
+            VolumeSize: '10'
+
+# Auto Scaling Group:
+    UdagramWebAppGroup:
+      Type: AWS::AutoScaling::AutoScalingGroup
+      Properties:
+        VPCZoneIdentifier:
+          - Fn::ImportValue: !Sub "${EnvironmentName}-PRIV-NETS"
+        LaunchConfigurationName:
+          Ref: UdagramWebAppLaunchConfig
+        MinSize: '4'
+        MaxSize: '5'
+        TargetGroupARNs:
+        - Ref: UdagramWebAppTargetGroup
+
+
+
+# Load Balancer
+    UdagramWebAppLoadBalancer:
+      Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+      Properties:
+        Subnets:
+          - Fn::ImportValue: !Sub "${EnvironmentName}-PUB1-SN"
+          - Fn::ImportValue: !Sub "${EnvironmentName}-PUB2-SN"
+        SecurityGroups: [!Ref UdagramLoadBalancerSecGroup]
+
+
+
+    Listener:
+      Type: AWS::ElasticLoadBalancingV2::Listener
+      Properties:
+        DefaultActions:
+        - Type: forward
+          TargetGroupArn:
+            Ref: UdagramWebAppTargetGroup
+        LoadBalancerArn:
+          Ref: UdagramWebAppLoadBalancer
+        Port: '80'
+        Protocol: HTTP
+
+    ALBListenerRule:
+        Type: AWS::ElasticLoadBalancingV2::ListenerRule
+        Properties:
+          Actions:
+          - Type: forward
+            TargetGroupArn: !Ref 'UdagramWebAppTargetGroup'
+          Conditions:
+          - Field: path-pattern
+            Values: [/]
+          ListenerArn: !Ref 'Listener'
+          Priority: 1
+
+    UdagramWebAppTargetGroup:
+      Type: AWS::ElasticLoadBalancingV2::TargetGroup
+      Properties:
+        HealthCheckIntervalSeconds: 60
+        HealthCheckPath: /
+        HealthCheckProtocol: HTTP
+        HealthCheckTimeoutSeconds: 30
+        HealthyThresholdCount: 3
+        Port: 80
+        Protocol: HTTP
+        UnhealthyThresholdCount: 5
+        VpcId:
+          Fn::ImportValue:
+            !Sub "${EnvironmentName}-VPCID"
+
+Outputs:
+    LoadBalancerPublicURL: 
+        Description: The public URL of the created load balancer
+        Value: !GetAtt UdagramWebAppLoadBalancer.DNSName
+        Export:
+          #Name: !Sub ${EnvironmentName}-LBURL
+          Name: !Join [ "", [!Ref "EnvironmentName", -LBURL]] 

@@ -1,0 +1,10 @@
+[
+	{
+		"ParameterKey": "EnvironmentName",
+		"ParameterValue": "Udagram"
+	},
+	{
+		"ParameterKey": "UbuntuAMI",
+		"ParameterValue": "ami-07452e54e776102de"		
+	}
+]
